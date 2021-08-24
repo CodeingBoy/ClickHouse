@@ -2,7 +2,7 @@
 
 Clickhouse 中最强大的表引擎当属 `MergeTree`（合并树）引擎及该系列（`*MergeTree`）中的其他引擎。
 
-`MergeTree` 系列的引擎被设计用于插入极大量的数据到一张表当中。数据会被快速地写入到相邻的分片中，并在后台按照一定的规则合并这些分片。相比于在插入时不断修改（重写）已存储的数据，这种策略提升了写入性能。
+`MergeTree` 系列的引擎被设计用于插入极大量的数据到一张表当中。数据会被快速地写入到多个数据片段中，并在后台按照一定的规则合并这些片段。相比于在插入时不断修改（重写）已存储的数据，这种策略提升了写入性能。
 
 主要特点:
 
@@ -377,17 +377,44 @@ WHERE 子句中的条件可以包含对某列数据进行运算的函数表达�
   - `s != 1`
   - `NOT startsWith(s, 'test')`
 
+### 投影 {#projections}
+
+投影类似于物化视图，但它在数据片段级别上定义。用于在查询中提供自动的一致性保证。
+
+#### 投影查询 {#projection-query}
+
+投影基于投影查询进行定义。它的语法如下：
+A projection query is what defines a projection. It has the following grammar:
+
+`SELECT <COLUMN LIST EXPR> [GROUP BY] [ORDER BY]`
+
+默认情况下，将会从父表查询数据。
+
+#### 存储 {#projection-storage}
+
+投影会被存储到数据片段的目录。它类似于索引，但包含了存储匿名 MergeTree 表的子目录。该表基于定义的投影查询进行计算。若查询包含 GROUP BY 子句，匿名表将自动使用 AggregatedMergeTree 作为引擎，并将所有聚集函数转换为 AggregateFunction。若查询包含 ORDER BY 子句，将把排序列作为 MergeTree 表的主键表达式。在数据片段合并的过程中，包含投影的数据片段会借助存储的合并功能进行合并。父表的校验和会包含投影表。其它维护性工作与数据跳过索引类似。
+Projections are stored inside the part directory. It's similar to an index but contains a subdirectory that stores an anonymous MergeTree table's part. The table is induced by the definition query of the projection. If there is a GROUP BY clause, the underlying storage engine becomes AggregatedMergeTree, and all aggregate functions are converted to AggregateFunction. If there is an ORDER BY clause, the MergeTree table will use it as its primary key expression. During the merge process, the projection part will be merged via its storage's merge routine. The checksum of the parent table's part will combine the projection's part. Other maintenance jobs are similar to skip indices.
+
+#### 查询分析 {#projection-query-analysis}
+
+1. 检查投影是否能应答给定的查询，也就是说，查询投影表与查询父表都能返回相同的结果。
+2. 选择最优匹配，也就是只需要读取最少颗粒。
+3. 使用投影表的查询流水线会和不使用的有部分差异。如果投影表缺少了部分数据，可以让流水线实时进行投影。
+4. Check if the projection can be used to answer the given query, that is, it generates the same answer as querying the base table.
+5. Select the best feasible match, which contains the least granules to read.
+6. The query pipeline which uses projections will be different from the one that uses the original parts. If the projection is absent in some parts, we can add the pipeline to "project" it on the fly.
+
 ## 并发数据访问 {#concurrent-data-access}
 
-对于表的并发访问，我们使用多版本机制。换言之，当一张表同时被读和更新时，数据从当前查询到的一组片段中读取。没有冗长的的锁。插入不会阻碍读取。
+我们基于多版本机制实现并发数据访问。换言之，当一张表同时被读取和更新时，数据会从当前版本的数据片段中读取。没有冗长的锁。插入也不会阻碍读取。
 
 对表的读操作是自动并行的。
 
 ## 列和表的 TTL {#table_engine-mergetree-ttl}
 
-TTL用于设置值的生命周期，它既可以为整张表设置，也可以为每个列字段单独设置。表级别的 TTL 还会指定数据在磁盘和卷上自动转移的逻辑。
+TTL 决定了值的生命周期，它既可以为整张表设置，也可以为每一列单独设置。表级别的 TTL 还可以指定数据在磁盘和卷上自动转移的逻辑。
 
-TTL 表达式的计算结果必须是 [日期](../../../engines/table-engines/mergetree-family/mergetree.md) 或 [日期时间](../../../engines/table-engines/mergetree-family/mergetree.md) 类型的字段。
+TTL 表达式的计算结果必须是 [Date](../../../engines/table-engines/mergetree-family/mergetree.md) 或 [DateTime](../../../engines/table-engines/mergetree-family/mergetree.md) 类型的字段。
 
 示例：
 
@@ -396,7 +423,7 @@ TTL time_column
 TTL time_column + interval
 ```
 
-要定义`interval`, 需要使用 [时间间隔](../../../engines/table-engines/mergetree-family/mergetree.md#operators-datetime) 操作符。
+为了定义 `interval`, 需要使用[时间间隔](../../../engines/table-engines/mergetree-family/mergetree.md#operators-datetime)操作符。
 
 ``` sql
 TTL date_time + INTERVAL 1 MONTH
@@ -405,9 +432,9 @@ TTL date_time + INTERVAL 15 HOUR
 
 ### 列 TTL {#mergetree-column-ttl}
 
-当列中的值过期时, ClickHouse会将它们替换成该列数据类型的默认值。如果数据片段中列的所有值均已过期，则ClickHouse 会从文件系统中的数据片段中删除此列。
+当列中的值过期时, ClickHouse 会将它们替换成该列数据类型的默认值。如果数据片段中列的所有值均已过期，则 ClickHouse 会从文件系统中的数据片段中删除此列。
 
-`TTL`子句不能被用于主键字段。
+`TTL` 子句不能被用于主键字段。
 
 **示例:**
 
@@ -461,7 +488,7 @@ TTL 规则的类型紧跟在每个 TTL 表达式后面，它会影响满足表�
 - `TO VOLUME 'bbb'` - 将数据片段移动到卷 `bbb`.
 - `GROUP BY` - 聚合过期的行
 
-使用`WHERE`从句，您可以指定哪些过期的行会被删除或聚合(不适用于移动)。`GROUP BY`表达式必须是表主键的前缀。如果某列不是`GROUP BY`表达式的一部分，也没有在SET从句显示引用，结果行中相应列的值是随机的(就好像使用了`any`函数)。
+使用 `WHERE` 子句，您可以指定哪些过期的行会被删除或聚合（不适用于移动操作）。`GROUP BY` 表达式必须是表主键的前缀。如果某列不是 `GROUP BY` 表达式的一部分，也没有在 `SET` 子句中显式引用，结果中对应列的值是随机选择的（就好像使用了 `any` 聚集函数）。
 
 **示例**:
 
@@ -502,7 +529,7 @@ ORDER BY d
 TTL d + INTERVAL 1 MONTH DELETE WHERE toDayOfWeek(d) = 1;
 ```
 
-创建一张表，设置过期的列会被聚合。列`x`包含每组行中的最大值，`y`为最小值，`d`为可能任意值。
+创建一张表，设置过期的列会被聚合。列 `x` 包含每组行中的最大值，`y` 为最小值，`d` 为可能任意值。
 
 ``` sql
 CREATE TABLE table_for_aggregation
@@ -522,15 +549,15 @@ TTL d + INTERVAL 1 MONTH GROUP BY k1, k2 SET x = max(x), y = min(y);
 
 ClickHouse 在数据片段合并时会删除掉过期的数据。
 
-当ClickHouse发现数据过期时, 它将会执行一个计划外的合并。要控制这类合并的频率, 您可以设置 `merge_with_ttl_timeout`。如果该值被设置的太低, 它将引发大量计划外的合并，这可能会消耗大量资源。
+当 ClickHouse 发现数据过期时, 它将会执行一个计划外的合并。要控制这类合并的频率，您可以设置 `merge_with_ttl_timeout`。如果该值被设置的太低，它将引发大量计划外的合并，这可能会消耗大量资源。
 
-如果在合并的过程中执行 `SELECT` 查询, 则可能会得到过期的数据。为了避免这种情况，可以在 `SELECT` 之前使用 [OPTIMIZE](../../../engines/table-engines/mergetree-family/mergetree.md#misc_operations-optimize) 。
+如果在合并的过程中执行 `SELECT` 查询, 则可能会得到过期的数据。为了避免这种情况，可以在 `SELECT` 之前使用 [OPTIMIZE](../../../engines/table-engines/mergetree-family/mergetree.md#misc_operations-optimize) 查询。
 
 ## 使用多个块设备进行数据存储 {#table_engine-mergetree-multiple-volumes}
 
 ### 介绍 {#introduction}
 
-MergeTree 系列表引擎可以将数据存储在多个块设备上。这对某些可以潜在被划分为“冷”“热”的表来说是很有用的。最新数据被定期的查询但只需要很小的空间。相反，详尽的历史数据很少被用到。如果有多块磁盘可用，那么“热”的数据可以放置在快速的磁盘上（比如 NVMe 固态硬盘或内存），“冷”的数据可以放在相对较慢的磁盘上（比如机械硬盘）。
+MergeTree 系列表引擎可以将数据存储在多个块设备上。这对某些可以潜在被划分为“冷”“热”的表来说是很有用的。最新数据会被定期查询，但只需要占用很少的空间。另一方面，详尽的历史数据偶尔才会用到。如果有多块磁盘可用，那么“热”的数据可以放置在快速的磁盘上（比如 NVMe 固态硬盘或内存），“冷”的数据可以放在相对较慢的磁盘上（比如机械硬盘）。
 
 数据片段是 `MergeTree` 引擎表的最小可移动单元。属于同一个数据片段的数据被存储在同一块磁盘上。数据片段会在后台自动的在磁盘间移动，也可以通过 [ALTER](../../../sql-reference/statements/alter.md#alter_move-partition) 查询来移动。
 
@@ -538,21 +565,21 @@ MergeTree 系列表引擎可以将数据存储在多个块设备上。这对某�
 
 - 磁盘 — 挂载到文件系统的块设备
 - 默认磁盘 — 在服务器设置中通过 [path](../../../operations/server-configuration-parameters/settings.md#server_configuration_parameters-path) 参数指定的数据存储
-- 卷 — 相同磁盘的顺序列表 （类似于 [JBOD](https://en.wikipedia.org/wiki/Non-RAID_drive_architectures)）
-- 存储策略 — 卷的集合及他们之间的数据移动规则
+- 卷 — 相同磁盘的有序列表（类似于 [JBOD](https://en.wikipedia.org/wiki/Non-RAID_drive_architectures)）
+- 存储策略 — 卷的集合及它们之间的数据移动规则
 
- 以上名称的信息在Clickhouse中系统表[system.storage_policies](https://clickhouse.tech/docs/zh/operations/system-tables/storage_policies/#system_tables-storage_policies)和[system.disks](https://clickhouse.tech/docs/zh/operations/system-tables/disks/#system_tables-disks)体现。为了应用存储策略，可以在建表时使用`storage_policy`设置。
+以上名称的信息在 Clickhouse 中系统表 [system.storage_policies](https://clickhouse.tech/docs/zh/operations/system-tables/storage_policies/#system_tables-storage_policies) 和 [system.disks](https://clickhouse.tech/docs/zh/operations/system-tables/disks/#system_tables-disks) 体现。要应用存储策略，可以在建表时指定 `storage_policy` 配置。
 
 ### 配置 {#table_engine-mergetree-multiple-volumes_configure}
 
-磁盘、卷和存储策略应当在主配置文件 `config.xml` 或 `config.d` 目录中的独立文件中的 `<storage_configuration>` 标签内定义。
+磁盘、卷和存储策略应当在主配置文件 `config.xml` 或 `config.d` 目录中配置文件中的 `<storage_configuration>` 标签内定义。
 
 配置结构：
 
 ``` xml
 <storage_configuration>
     <disks>
-        <disk_name_1> <!-- disk name -->
+        <disk_name_1> <!-- 磁盘名 -->
             <path>/mnt/fast_ssd/clickhouse/</path>
         </disk_name_1>
         <disk_name_2>
@@ -573,11 +600,11 @@ MergeTree 系列表引擎可以将数据存储在多个块设备上。这对某�
 
 标签：
 
-- `<disk_name_N>` — 磁盘名，名称必须与其他磁盘不同.
-- `path` — 服务器将用来存储数据 (`data` 和 `shadow` 目录) 的路径, 应当以 ‘/’ 结尾.
-- `keep_free_space_bytes` — 需要保留的剩余磁盘空间.
+- `<disk_name_N>` — 磁盘名，名称必须与其他磁盘不同。
+- `path` — 服务器存储数据 (`data` 和 `shadow` 目录) 的路径, 应当以 ‘/’ 结尾。
+- `keep_free_space_bytes` — 需要保留的剩余磁盘空间。
 
-磁盘定义的顺序无关紧要。
+可以以任意顺序定义磁盘。
 
 存储策略配置：
 
@@ -592,17 +619,17 @@ MergeTree 系列表引擎可以将数据存储在多个块设备上。这对某�
                     <max_data_part_size_bytes>1073741824</max_data_part_size_bytes>
                 </volume_name_1>
                 <volume_name_2>
-                    <!-- configuration -->
+                    <!-- 卷配置 -->
                 </volume_name_2>
-                <!-- more volumes -->
+                <!-- 可以加入更多的卷 -->
             </volumes>
             <move_factor>0.2</move_factor>
         </policy_name_1>
         <policy_name_2>
-            <!-- configuration -->
+            <!-- 策略配置 -->
         </policy_name_2>
 
-        <!-- more policies -->
+        <!-- 可以加入更多策略 -->
     </policies>
     ...
 </storage_configuration>
@@ -613,9 +640,9 @@ MergeTree 系列表引擎可以将数据存储在多个块设备上。这对某�
 - `policy_name_N` — 策略名称，不能重复。
 - `volume_name_N` — 卷名称，不能重复。
 - `disk` — 卷中的磁盘。
-- `max_data_part_size_bytes` — 卷中的磁盘可以存储的数据片段的最大大小。
-- `move_factor` — 当可用空间少于这个因子时，数据将自动的向下一个卷（如果有的话）移动 (默认值为 0.1)。
-- `prefer_not_to_merge` - 禁止在这个卷中进行数据合并。该选项启用时，对该卷的数据不能进行合并。这个选项主要用于慢速磁盘。
+- `max_data_part_size_bytes` — 卷中磁盘可存储的数据片段的大小上限。
+- `move_factor` — 当可用空间少于这个因子时，数据将自动的向下一个卷（如果有的话）移动（默认值为 0.1）。
+- `prefer_not_to_merge` - 禁止在这个卷中进行数据合并。该选项启用时，禁止对该卷的数据进行合并。主要用于慢速磁盘。
 
 配置示例：
 
@@ -623,9 +650,9 @@ MergeTree 系列表引擎可以将数据存储在多个块设备上。这对某�
 <storage_configuration>
     ...
     <policies>
-        <hdd_in_order> <!-- policy name -->
+        <hdd_in_order> <!-- 策略名 -->
             <volumes>
-                <single> <!-- volume name -->
+                <single> <!-- 卷名 -->
                     <disk>disk1</disk>
                     <disk>disk2</disk>
                 </single>
@@ -661,12 +688,12 @@ MergeTree 系列表引擎可以将数据存储在多个块设备上。这对某�
 </storage_configuration>
 ```
 
-在给出的例子中， `hdd_in_order` 策略实现了 [循环制](https://zh.wikipedia.org/wiki/循环制) 方法。因此这个策略只定义了一个卷（`single`），数据片段会以循环的顺序全部存储到它的磁盘上。当有多个类似的磁盘挂载到系统上，但没有配置 RAID 时，这种策略非常有用。请注意一个每个独立的磁盘驱动都并不可靠，您可能需要用3份或更多的复制份数来补偿它。
+在给出的例子中， `hdd_in_order` 策略实现了[轮询](https://zh.wikipedia.org/wiki/循环制)方法。因此这个策略只定义了一个卷（`single`），数据片段会以循环的顺序全部存储到它的磁盘上。当有多个类似的磁盘挂载到系统上，但没有配置 RAID 时，这种策略非常有用。但请注意，这些磁盘都不保证数据的可靠性，您可能需要用 3 份以上的副本机制来确保可靠性。
 
-如果在系统中有不同类型的磁盘可用，可以使用  `moving_from_ssd_to_hdd`。`hot` 卷由 SSD 磁盘（`fast_ssd`）组成，这个卷上可以存储的数据片段的最大大小为 1GB。所有大于 1GB 的数据片段都会被直接存储到 `cold` 卷上，`cold` 卷包含一个名为 `disk1` 的 HDD 磁盘。
-同样，一旦 `fast_ssd` 被填充超过 80%，数据会通过后台进程向 `disk1` 进行转移。
+如果在系统中有不同类型的磁盘可用，可以使用 `moving_from_ssd_to_hdd` 策略。`hot` 卷由 SSD 磁盘（`fast_ssd`）组成，这个卷上可以存储的数据片段的最大大小为 1GB。所有大于 1GB 的数据片段都会被直接存储到 `cold` 卷上，`cold` 卷包含一个名为 `disk1` 的 HDD 磁盘。
+同样，一旦 `fast_ssd` 使用了 80% 的容量，数据会通过后台进程向 `disk1` 进行转移。
 
-存储策略中卷的枚举顺序是很重要的。因为当一个卷被充满时，数据会向下一个卷转移。磁盘的枚举顺序同样重要，因为数据是依次存储在磁盘上的。
+存储策略中卷的枚举顺序是很重要的。因为当一个卷容量不足时，数据会向下一个卷转移。磁盘的枚举顺序同样重要，因为数据是依次存储在磁盘上的。
 
 在创建表时，可以应用存储策略：
 
@@ -682,37 +709,39 @@ PARTITION BY toYYYYMM(EventDate)
 SETTINGS storage_policy = 'moving_from_ssd_to_hdd'
 ```
 
-`default` 存储策略意味着只使用一个卷，这个卷只包含一个在 `<path>` 中定义的磁盘。您可以使用[ALTER TABLE ... MODIFY SETTING]来修改存储策略，新的存储策略应该包含所有以前的磁盘和卷，并使用相同的名称。
+`default` 存储策略意味着只使用一个卷，这个卷只包含一个在 `<path>` 中定义的磁盘。您可以使用 [ALTER TABLE ... MODIFY SETTING] 来修改存储策略，新的存储策略应该包含所有以前的磁盘和卷，这些磁盘和卷都需要保持和之前相同的名称。
 
-可以通过 [background_move_pool_size](../../../operations/settings/settings.md#background_move_pool_size) 设置调整执行后台任务的线程数。
+可以通过 [background_move_pool_size](../../../operations/settings/settings.md#background_move_pool_size) 设置调整执行后台转移任务的线程数。
 
 ### 详细说明 {#details}
 
-对于 `MergeTree` 表，数据通过以下不同的方式写入到磁盘当中：
+对于 `MergeTree` 表，数据通过以下几种方式写入到磁盘当中：
 
-- 插入（`INSERT`查询）
+- 插入（`INSERT` 查询）
 - 后台合并和[数据变异](../../../sql-reference/statements/alter.md#alter-mutations)
-- 从另一个副本下载
-- [ALTER TABLE … FREEZE PARTITION](../../../sql-reference/statements/alter.md#alter_freeze-partition) 冻结分区
+- 复制另一份副本
+- 使用 [ALTER TABLE … FREEZE PARTITION](../../../sql-reference/statements/alter.md#alter_freeze-partition) 冻结分区
 
-除了数据变异和冻结分区以外的情况下，数据按照以下逻辑存储到卷或磁盘上：
+除数据变异和冻结分区以外，数据按照以下逻辑存储到卷或磁盘上：
 
-1. 首个卷（按定义顺序）拥有足够的磁盘空间存储数据片段（`unreserved_space > current_part_size`）并且允许存储给定数据片段的大小（`max_data_part_size_bytes > current_part_size`）
-2. 在这个数据卷内，紧挨着先前存储数据的那块磁盘之后的磁盘，拥有比数据片段大的剩余空间。（`unreserved_space - keep_free_space_bytes > current_part_size`）
+1. 按照定义顺序，选择拥有充足空间（`unreserved_space > current_part_size`）并且能够容纳指定数据片段（`max_data_part_size_bytes > current_part_size`）的第一个卷
+2. 在这个数据卷内，从前一个数据存储磁盘开始，选择下一个能够容纳该数据片段（`unreserved_space - keep_free_space_bytes > current_part_size`）的磁盘。
 
-更进一步，数据变异和分区冻结使用的是 [硬链接](https://en.wikipedia.org/wiki/Hard_link)。不同磁盘之间的硬链接是不支持的，所以在这种情况下数据片段都会被存储到原来的那一块磁盘上。
+数据变异和分区冻结是基于[硬链接](https://en.wikipedia.org/wiki/Hard_link)实现的。由于不支持在不同磁盘之间建立硬链接，在这种情况下，数据片段都会被存储到原来的那一块磁盘上。
 
-在后台，数据片段基于剩余空间（`move_factor`参数）根据卷在配置文件中定义的顺序进行转移。数据永远不会从最后一个移出也不会从第一个移入。可以通过系统表 [system.part_log](../../../operations/system-tables/part_log.md#system_tables-part-log) (字段 `type = MOVE_PART`) 和 [system.parts](../../../operations/system-tables/parts.md#system_tables-parts) (字段 `path` 和 `disk`) 来监控后台的移动情况。具体细节可以通过服务器日志查看。
+在后台，数据片段基于剩余空间因数（`move_factor`参数）按照卷在配置文件中定义的顺序进行转移。
+数据永远不会从最后一个卷转移到第一个卷。用户可以通过系统表 [system.part_log](../../../operations/system-tables/part_log.md#system_tables-part-log)（字段 `type = MOVE_PART`）和 [system.parts](../../../operations/system-tables/parts.md#system_tables-parts)（字段 `path` 和 `disk`）监控后台的移动情况。具体细节可以通过服务器日志查看。
 
-用户可以通过 [ALTER TABLE … MOVE PART\|PARTITION … TO VOLUME\|DISK …](../../../sql-reference/statements/alter.md#alter_move-partition) 强制移动一个数据片段或分区到另外一个卷，所有后台移动的限制都会被考虑在内。这个查询会自行启动，无需等待后台操作完成。如果没有足够的可用空间或任何必须条件没有被满足，用户会收到报错信息。
+用户可以通过 [ALTER TABLE … MOVE PART\|PARTITION … TO VOLUME\|DISK …](../../../sql-reference/statements/alter.md#alter_move-partition) 强制移动一个数据片段或分区到另外一个卷。该查询会遵守所有后台移动的限制，并在稍后自行启动移动作业，无需等待其它后台操作完成。如果没有足够的可用空间或不满足任何必须条件，用户会收到报错信息。
 
 数据移动不会妨碍到数据复制。也就是说，同一张表的不同副本可以指定不同的存储策略。
 
-在后台合并和数据变异之后，旧的数据片段会在一定时间后被移除 (`old_parts_lifetime`)。在这期间，他们不能被移动到其他的卷或磁盘。也就是说，直到数据片段被完全移除，它们仍然会被磁盘占用空间计算在内。
+在后台合并和数据变异之后，旧的数据片段会在一定时间后被移除 (`old_parts_lifetime`)。
+在此期间，它们不能被移动到其它的卷或磁盘。也就是说，直到数据片段被完全移除之前，它们还是会算在磁盘占用空间里面。
 
-## 使用S3进行数据存储 {#using-s3-data-storage}
+## 使用 S3 进行数据存储 {#using-s3-data-storage}
 
-`MergeTree`系列表引擎允许使用[S3](https://aws.amazon.com/s3/)存储数据，需要修改磁盘类型为`S3`。
+`MergeTree`系列表引擎允许使用 [S3](https://aws.amazon.com/s3/) 存储数据，需要修改磁盘类型为 `S3`。
 
 示例配置：
 
@@ -748,28 +777,28 @@ SETTINGS storage_policy = 'moving_from_ssd_to_hdd'
 
 必须的参数：
 
-- `endpoint` - S3的结点URL，以`path`或`virtual hosted`[格式](https://docs.aws.amazon.com/AmazonS3/latest/dev/VirtualHosting.html)书写。
-- `access_key_id` - S3的Access Key ID。
-- `secret_access_key` - S3的Secret Access Key。
+- `endpoint` - S3 的端点URL，以 `path` 或 [`virtual hosted` 风格](https://docs.aws.amazon.com/AmazonS3/latest/dev/VirtualHosting.html)书写。
+- `access_key_id` - S3 的 Access Key ID。
+- `secret_access_key` - S3 的 Secret Access Key。
 
 可选参数：
 
-- `region` - S3的区域名称
-- `use_environment_credentials` - 从环境变量AWS_ACCESS_KEY_ID、AWS_SECRET_ACCESS_KEY和AWS_SESSION_TOKEN中读取认证参数。默认值为`false`。
-- `use_insecure_imds_request` - 如果设置为`true`，S3客户端在认证时会使用不安全的IMDS请求。默认值为`false`。
-- `proxy` - 访问S3结点URL时代理设置。每一个`uri`项的值都应该是合法的代理URL。
-- `connect_timeout_ms` - Socket连接超时时间，默认值为`10000`，即10秒。
-- `request_timeout_ms` - 请求超时时间，默认值为`5000`，即5秒。
-- `retry_attempts` - 请求失败后的重试次数，默认值为10。
-- `single_read_retries` - 读过程中连接丢失后重试次数，默认值为4。
-- `min_bytes_for_seek` - 使用查找操作，而不是顺序读操作的最小字节数，默认值为1000。
-- `metadata_path` - 本地存放S3元数据文件的路径，默认值为`/var/lib/clickhouse/disks/<disk_name>/`
-- `cache_enabled` - 是否允许缓存标记和索引文件。默认值为`true`。
-- `cache_path` - 本地缓存标记和索引文件的路径。默认值为`/var/lib/clickhouse/disks/<disk_name>/cache/`。
-- `skip_access_check` - 如果为`true`，Clickhouse启动时不检查磁盘是否可用。默认为`false`。
-- `server_side_encryption_customer_key_base64` - 如果指定该项的值，请求时会加上为了访问SSE-C加密数据而必须的头信息。
+- `region` - S3 的区域名称
+- `use_environment_credentials` - 从 AWS_ACCESS_KEY_ID、AWS_SECRET_ACCESS_KEY 和 AWS_SESSION_TOKEN 环境变量中读取认证参数。默认值为 `false`。
+- `use_insecure_imds_request` - 如果设置为 `true`，S3客户端在认证时会使用不安全的 IMDS 请求。默认值为`false`。
+- `proxy` - 访问 S3 端点 URL 时的代理设置。每一个 `uri` 项的值都应该是合法的代理 URL。
+- `connect_timeout_ms` - Socket 连接超时时间，默认值为 `10000`，即 10 秒。
+- `request_timeout_ms` - 请求超时时间，默认值为 `5000`，即 5 秒。
+- `retry_attempts` - 请求失败后的重试次数，默认值为 10。
+- `single_read_retries` - 读过程中连接丢失后重试次数，默认值为 4。
+- `min_bytes_for_seek` - 使用查找操作，而不是顺序读操作的最小字节数，默认值为 1000。
+- `metadata_path` - 本地存放S3元数据文件的路径，默认值为 `/var/lib/clickhouse/disks/<disk_name>/`
+- `cache_enabled` - 是否允许缓存标记和索引文件。默认值为 `true`。
+- `cache_path` - 本地缓存标记和索引文件的路径。默认值为 `/var/lib/clickhouse/disks/<disk_name>/cache/`。
+- `skip_access_check` - 如果为 `true`，Clickhouse 启动时不检查磁盘是否可用。默认为 `false`。
+- `server_side_encryption_customer_key_base64` - 如果指定该项的值，请求时会加上为了访问 SSE-C 加密数据而必须的头信息。
 
-S3磁盘也可以设置冷热存储：
+S3 存储也可以设置冷热存储：
 ```xml
 <storage_configuration>
     ...
@@ -805,6 +834,6 @@ S3磁盘也可以设置冷热存储：
 </storage_configuration>
 ```
 
-指定了`cold`选项后，本地磁盘剩余空间如果小于`move_factor * disk_size`，或有TTL设置时，数据就会定时迁移至S3了。
+指定了 `cold` 选项后，本地磁盘剩余空间如果小于 `move_factor * disk_size`，或配置了 TTL 时，数据就会定时迁移至 S3 了。
 
 [原始文章](https://clickhouse.tech/docs/en/operations/table_engines/mergetree/) <!--hide-->
