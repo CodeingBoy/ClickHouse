@@ -1,8 +1,8 @@
 # MergeTree {#table_engines-mergetree}
 
-Clickhouse 中最强大的表引擎当属 `MergeTree` （合并树）引擎及该系列（`*MergeTree`）中的其他引擎。
+Clickhouse 中最强大的表引擎当属 `MergeTree`（合并树）引擎及该系列（`*MergeTree`）中的其他引擎。
 
-`MergeTree` 系列的引擎被设计用于插入极大量的数据到一张表当中。数据可以以数据片段的形式一个接着一个的快速写入，数据片段在后台按照一定的规则进行合并。相比在插入时不断修改（重写）已存储的数据，这种策略会高效很多。
+`MergeTree` 系列的引擎被设计用于插入极大量的数据到一张表当中。数据会被快速地写入到相邻的分片中，并在后台按照一定的规则合并这些分片。相比于在插入时不断修改（重写）已存储的数据，这种策略提升了写入性能。
 
 主要特点:
 
@@ -10,20 +10,20 @@ Clickhouse 中最强大的表引擎当属 `MergeTree` （合并树）引擎及�
 
     这使得您能够创建一个小型的稀疏索引来加快数据检索。
 
-- 如果指定了 [分区键](custom-partitioning-key.md) 的话，可以使用分区。
+- 支持基于[分区键](custom-partitioning-key.md)的分区功能。
 
-    在相同数据集和相同结果集的情况下 ClickHouse 中某些带分区的操作会比普通操作更快。查询中指定了分区键时 ClickHouse 会自动截取分区数据。这也有效增加了查询性能。
+    在相同数据集和相同结果集的情况下，ClickHouse 对分区进行的操作会比普通操作更快。查询中指定了分区键时，ClickHouse 会自动截取指定分区数据。
 
 - 支持数据副本。
 
-    `ReplicatedMergeTree` 系列的表提供了数据副本功能。更多信息，请参阅 [数据副本](replication.md) 一节。
+    `ReplicatedMergeTree` 系列的表提供了数据副本功能。更多信息，请参阅[数据副本](replication.md)一节。
 
 - 支持数据采样。
 
-    需要的话，您可以给表设置一个采样方法。
+    您可以给表设置一个采样方法。
 
 !!! note "注意"
-    [合并](../special/merge.md#merge) 引擎并不属于 `*MergeTree` 系列。
+    [合并（Merge）](../special/merge.md#merge)引擎并不属于 `*MergeTree` 系列。
 
 ## 建表 {#table_engine-mergetree-creating-a-table}
 
@@ -44,64 +44,61 @@ ORDER BY expr
 [SETTINGS name=value, ...]
 ```
 
-对于以上参数的描述，可参考 [CREATE 语句 的描述](../../../engines/table-engines/mergetree-family/mergetree.md) 。
+若想了解上述语句中参数的说明，请参阅 [CREATE 语句的说明](../../../engines/table-engines/mergetree-family/mergetree.md) 。
 
 <a name="mergetree-query-clauses"></a>
 
 **子句**
 
-- `ENGINE` - 引擎名和参数。 `ENGINE = MergeTree()`. `MergeTree` 引擎没有参数。
+- `ENGINE` - 引擎名和引擎参数，也就是 `ENGINE = MergeTree()`。`MergeTree` 引擎没有参数。
 
 - `ORDER BY` — 排序键。
 
-     可以是一组列的元组或任意的表达式。 例如: `ORDER BY (CounterID, EventDate)` 。
+     可以是列的元组或任意的表达式。例如: `ORDER BY (CounterID, EventDate)` 。
 
-     如果没有使用 `PRIMARY KEY` 显式指定的主键，ClickHouse 会使用排序键作为主键。
+     如果没有使用 `PRIMARY KEY` 显式指定主键，ClickHouse 会使用排序键作为主键。
 
-     如果不需要排序，可以使用 `ORDER BY tuple()`. 参考 [选择主键](https://clickhouse.tech/docs/en/engines/table-engines/mergetree-family/mergetree/#selecting-the-primary-key)
+     如果不需要排序，可以使用 `ORDER BY tuple()`。更多信息可参考[选择主键](https://clickhouse.tech/docs/en/engines/table-engines/mergetree-family/mergetree/#selecting-the-primary-key)。
 
 - `PARTITION BY` — [分区键](custom-partitioning-key.md) ，可选项。
 
-     要按月分区，可以使用表达式 `toYYYYMM(date_column)` ，这里的 `date_column` 是一个 [Date](../../../engines/table-engines/mergetree-family/mergetree.md) 类型的列。分区名的格式会是 `"YYYYMM"` 。
+     要按月分区，可以使用表达式 `toYYYYMM(date_column)`，这里的 `date_column` 是一个 [Date](../../../engines/table-engines/mergetree-family/mergetree.md) 类型的列。分区名的格式会是 `"YYYYMM"` 。
 
-- `PRIMARY KEY` - 如果要 [选择与排序键不同的主键](#choosing-a-primary-key-that-differs-from-the-sorting-key)，在这里指定，可选项。
+- `PRIMARY KEY` - 可以在此[选择与排序键不同的主键](#choosing-a-primary-key-that-differs-from-the-sorting-key)，可选项。
 
-    默认情况下主键跟排序键（由 `ORDER BY` 子句指定）相同。
-    因此，大部分情况下不需要再专门指定一个 `PRIMARY KEY` 子句。
+    默认情况下主键跟排序键（由 `ORDER BY` 子句指定）相同。因此，一般不需要再专门指定 `PRIMARY KEY` 子句。
 
 - `SAMPLE BY` - 用于抽样的表达式，可选项。
 
-     如果要用抽样表达式，主键中必须包含这个表达式。例如：
-     `SAMPLE BY intHash32(UserID) ORDER BY (CounterID, EventDate, intHash32(UserID))` 。
+     使用抽样表达式时，主键中必须包含这个表达式。例如：`SAMPLE BY intHash32(UserID) ORDER BY (CounterID, EventDate, intHash32(UserID))` 。
 
-- `TTL` - 指定行存储的持续时间并定义数据片段在硬盘和卷上的移动逻辑的规则列表，可选项。
+- `TTL` - 指定每一行存储的持续时间，配置数据片段在硬盘和卷上的移动规则，可选项。
 
     表达式中必须存在至少一个 `Date` 或 `DateTime` 类型的列，比如：
-
     `TTL date + INTERVAl 1 DAY`
 
-    规则的类型 `DELETE|TO DISK 'xxx'|TO VOLUME 'xxx'`指定了当满足条件（到达指定时间）时所要执行的动作：移除过期的行，还是将数据片段（如果数据片段中的所有行都满足表达式的话）移动到指定的磁盘（`TO DISK 'xxx'`) 或 卷（`TO VOLUME 'xxx'`）。默认的规则是移除（`DELETE`）。可以在列表中指定多个规则，但最多只能有一个`DELETE`的规则。
+    规则的类型 `DELETE|TO DISK 'xxx'|TO VOLUME 'xxx'` 指定了当满足条件（到达指定时间）时所要执行的动作：移除过期的行，还是将数据片段（如果数据片段中的所有行都满足表达式的话）移动到指定的磁盘（`TO DISK 'xxx'`) 或卷（`TO VOLUME 'xxx'`）。默认的规则是移除（`DELETE`）。可以在列表中指定多个规则，但最多只能有一个 `DELETE` 的规则。
 
-    更多细节，请查看 [表和列的 TTL](#table_engine-mergetree-ttl)
+    更多信息请查看[表和列的 TTL](#table_engine-mergetree-ttl)
 
 - `SETTINGS` — 控制 `MergeTree` 行为的额外参数，可选项：
 
-  - `index_granularity` — 索引粒度。索引中相邻的『标记』间的数据行数。默认值8192 。参考[数据存储](#mergetree-data-storage)。
-  - `index_granularity_bytes` — 索引粒度，以字节为单位，默认值: 10Mb。如果想要仅按数据行数限制索引粒度, 请设置为0(不建议)。
-  - `min_index_granularity_bytes` - 允许的最小数据粒度，默认值：1024b。该选项用于防止误操作，添加了一个非常低索引粒度的表。参考[数据存储](#mergetree-data-storage)
-  - `enable_mixed_granularity_parts` — 是否启用通过 `index_granularity_bytes` 控制索引粒度的大小。在19.11版本之前, 只有 `index_granularity` 配置能够用于限制索引粒度的大小。当从具有很大的行（几十上百兆字节）的表中查询数据时候，`index_granularity_bytes` 配置能够提升ClickHouse的性能。如果您的表里有很大的行，可以开启这项配置来提升`SELECT` 查询的性能。
-  - `use_minimalistic_part_header_in_zookeeper` — ZooKeeper中数据片段存储方式 。如果`use_minimalistic_part_header_in_zookeeper=1` ，ZooKeeper 会存储更少的数据。更多信息参考[服务配置参数]([Server Settings | ClickHouse Documentation](https://clickhouse.tech/docs/zh/operations/server-configuration-parameters/settings/))这章中的 [设置描述](../../../operations/server-configuration-parameters/settings.md#server-settings-use_minimalistic_part_header_in_zookeeper) 。
-  - `min_merge_bytes_to_use_direct_io` — 使用直接 I/O 来操作磁盘的合并操作时要求的最小数据量。合并数据片段时，ClickHouse 会计算要被合并的所有数据的总存储空间。如果大小超过了 `min_merge_bytes_to_use_direct_io` 设置的字节数，则 ClickHouse 将使用直接 I/O 接口（`O_DIRECT` 选项）对磁盘读写。如果设置 `min_merge_bytes_to_use_direct_io = 0` ，则会禁用直接 I/O。默认值：`10 * 1024 * 1024 * 1024` 字节。
+  - `index_granularity` — 索引粒度行上限。索引中相邻的“标记”间的数据行数上限。默认值：8192 。详细请参考[数据存储](#mergetree-data-storage)。
+  - `index_granularity_bytes` — 索引粒度大小上限，以字节为单位，默认值: 10Mb。若想仅按数据行数限制索引粒度, 请设置为 0（不建议）。
+  - `min_index_granularity_bytes` - 索引粒度大小下限，默认值：1024b。该选项用于防止误操作，添加了一个非常低索引粒度的表。详细请参考[数据存储](#mergetree-data-storage)
+  - `enable_mixed_granularity_parts` — 是否使用 `index_granularity_bytes` 控制索引粒度的大小。在 19.11 版本之前, 仅能使用 `index_granularity` 来限制索引粒度的大小。当从具有很大的行（数十乃至数百兆字节）的表中查询数据的时候，`index_granularity_bytes` 配置能够提升 ClickHouse 的性能。如果您的表里有很大的行，可以开启这项配置来提升 `SELECT` 查询的性能。
+  - `use_minimalistic_part_header_in_zookeeper` — 控制 ZooKeeper 中数据片段头的存储方式。若 `use_minimalistic_part_header_in_zookeeper=1`，会减少在 ZooKeeper 中存储的数据量。更多信息请参考[服务配置参数]([Server Settings | ClickHouse Documentation](https://clickhouse.tech/docs/zh/operations/server-configuration-parameters/settings/))中的[设置描述](../../../operations/server-configuration-parameters/settings.md#server-settings-use_minimalistic_part_header_in_zookeeper) 一节。
+  - `min_merge_bytes_to_use_direct_io` — 高于此数据量时，才使用直接 I/O 操作磁盘进行数据合并。合并数据片段时，ClickHouse 会计算要被合并的所有数据的总存储空间。如果大小超过了 `min_merge_bytes_to_use_direct_io` 设置的字节数，则 ClickHouse 将使用直接 I/O 接口（`O_DIRECT` 选项）对磁盘读写。如果设置 `min_merge_bytes_to_use_direct_io = 0`，则会禁用直接 I/O。默认值：`10 * 1024 * 1024 * 1024` 字节。
         <a name="mergetree_setting-merge_with_ttl_timeout"></a>
-  - `merge_with_ttl_timeout` — TTL合并频率的最小间隔时间，单位：秒。默认值: 86400 (1 天)。
-  - `write_final_mark` — 是否启用在数据片段尾部写入最终索引标记。默认值: 1（不要关闭）。
-  - `merge_max_block_size` — 在块中进行合并操作时的最大行数限制。默认值：8192
-  - `storage_policy` — 存储策略。 参见 [使用具有多个块的设备进行数据存储](#table_engine-mergetree-multiple-volumes).
-  - `min_bytes_for_wide_part`,`min_rows_for_wide_part` 在数据片段中可以使用`Wide`格式进行存储的最小字节数/行数。您可以不设置、只设置一个，或全都设置。参考：[数据存储](#mergetree-data-storage)
-  - `max_parts_in_total` - 所有分区中最大块的数量(意义不明)
-  - `max_compress_block_size` - 在数据压缩写入表前，未压缩数据块的最大大小。您可以在全局设置中设置该值(参见[max_compress_block_size](https://clickhouse.tech/docs/zh/operations/settings/settings/#max-compress-block-size))。建表时指定该值会覆盖全局设置。
-  - `min_compress_block_size` - 在数据压缩写入表前，未压缩数据块的最小大小。您可以在全局设置中设置该值(参见[min_compress_block_size](https://clickhouse.tech/docs/zh/operations/settings/settings/#min-compress-block-size))。建表时指定该值会覆盖全局设置。
-  - `max_partitions_to_read` - 一次查询中可访问的分区最大数。您可以在全局设置中设置该值(参见[max_partitions_to_read](https://clickhouse.tech/docs/zh/operations/settings/settings/#max_partitions_to_read))。
+  - `merge_with_ttl_timeout` — TTL 合并频率的最小间隔时间，单位：秒。默认值: 86400（1 天）。
+  - `write_final_mark` — 是否在数据片段尾部写入最终索引标记。默认值: 1。请不要关闭此选项。
+  - `merge_max_block_size` — 合并时每一块的最大行数限制。默认值：8192
+  - `storage_policy` — 存储策略。详细请参考[使用具有多个块的设备进行数据存储](#table_engine-mergetree-multiple-volumes).
+  - `min_bytes_for_wide_part`、`min_rows_for_wide_part` — 当字节数/行数高于配置值时，使用 `Wide` 格式进行存储。您可以不设置、只设置一个，或全都设置。详细请参考[数据存储](#mergetree-data-storage)
+  - `max_parts_in_total` - 所有分区中块数量的上限
+  - `max_compress_block_size` - 在数据压缩写入表前，未压缩数据块的最大大小。您可以在全局设置中设置该值（参见[max_compress_block_size](https://clickhouse.tech/docs/zh/operations/settings/settings/#max-compress-block-size)）。建表时指定该值会覆盖全局设置。
+  - `min_compress_block_size` - 在数据压缩写入表前，未压缩数据块的最小大小。您可以在全局设置中设置该值（参见[min_compress_block_size](https://clickhouse.tech/docs/zh/operations/settings/settings/#min-compress-block-size)）。建表时指定该值会覆盖全局设置。
+  - `max_partitions_to_read` - 单次查询中可访问的分区数上限。您可以在全局设置中设置该值（参见[max_partitions_to_read](https://clickhouse.tech/docs/zh/operations/settings/settings/#max_partitions_to_read)）。
 
 **示例配置**
 
@@ -111,15 +108,15 @@ ENGINE MergeTree() PARTITION BY toYYYYMM(EventDate) ORDER BY (CounterID, EventDa
 
 在这个例子中，我们设置了按月进行分区。
 
-同时我们设置了一个按用户 ID 哈希的抽样表达式。这使得您可以对该表中每个 `CounterID` 和 `EventDate` 的数据伪随机分布。如果您在查询时指定了 [SAMPLE](../../../engines/table-engines/mergetree-family/mergetree.md#select-sample-clause) 子句。 ClickHouse会返回对于用户子集的一个均匀的伪随机数据采样。
+同时我们设置了一个按用户 ID 哈希的抽样表达式。使得您可以对该表中每个 `CounterID` 和 `EventDate` 的数据伪随机分布。如果您在查询时指定了 [SAMPLE](../../../engines/table-engines/mergetree-family/mergetree.md#select-sample-clause) 子句。ClickHouse 会返回对于用户子集的一个均匀的伪随机数据采样。
 
-`index_granularity` 可省略因为 8192 是默认设置 。
+`index_granularity` 可以省略，因为默认值就是 8192。
 
 <details markdown="1">
 <summary>已弃用的建表方法</summary>
 
 !!! attention "注意"
-    不要在新版项目中使用该方法，可能的话，请将旧项目切换到上述方法。
+    不要在新项目中使用该方法，建议尽可能地将旧项目迁移到上述的新方法上。
 
     CREATE TABLE [IF NOT EXISTS] [db.]table_name [ON CLUSTER cluster]
     (
@@ -130,34 +127,33 @@ ENGINE MergeTree() PARTITION BY toYYYYMM(EventDate) ORDER BY (CounterID, EventDa
 
 **MergeTree() 参数**
 
-- `date-column` — 类型为 [日期](../../../engines/table-engines/mergetree-family/mergetree.md) 的列名。ClickHouse 会自动依据这个列按月创建分区。分区名格式为 `"YYYYMM"` 。
+- `date-column` — [Date](../../../engines/table-engines/mergetree-family/mergetree.md) 类型列的名称。ClickHouse 会自动依据这个列按月创建分区。分区名格式为 `"YYYYMM"`。
 - `sampling_expression` — 采样表达式。
-- `(primary, key)` — 主键。类型 — [元组()](../../../engines/table-engines/mergetree-family/mergetree.md)
-- `index_granularity` — 索引粒度。即索引中相邻『标记』间的数据行数。设为 8192 可以适用大部分场景。
+- `(primary, key)` — 主键。类型为[元组()](../../../engines/table-engines/mergetree-family/mergetree.md)
+- `index_granularity` — 索引粒度。即索引中相邻“标记”间的数据行数。一般设为 8192 即可。
 
 **示例**
 
     MergeTree(EventDate, intHash32(UserID), (CounterID, EventDate, intHash32(UserID)), 8192)
 
-对于主要的配置方法，这里 `MergeTree` 引擎跟前面的例子一样，可以以同样的方式配置。
+上述示例配置的作用跟前面的例子一样。
 </details>
 
 ## 数据存储 {#mergetree-data-storage}
 
 表由按主键排序的数据片段（DATA PART）组成。
 
-当数据被插入到表中时，会创建多个数据片段并按主键的字典序排序。例如，主键是 `(CounterID, Date)` 时，片段中数据首先按 `CounterID` 排序，具有相同 `CounterID` 的部分按 `Date` 排序。
+当数据被插入到表中时，会创建多个数据片段并按主键的字典序排序。例如，主键是 `(CounterID, Date)` 时，片段中的数据首先按 `CounterID` 排序，相同 `CounterID` 的数据再按 `Date` 排序。
 
-不同分区的数据会被分成不同的片段，ClickHouse 在后台合并数据片段以便更高效存储。不同分区的数据片段不会进行合并。合并机制并不保证具有相同主键的行全都合并到同一个数据片段中。
+不同分区的数据会被分成不同的片段，ClickHouse 会在后台合并数据片段以优化存储效率。不同分区的数据片段不会进行合并。该合并机制不保证相同主键的行都在同一个数据片段中。
 
-数据片段可以以 `Wide` 或 `Compact` 格式存储。在 `Wide` 格式下，每一列都会在文件系统中存储为单独的文件，在 `Compact` 格式下所有列都存储在一个文件中。`Compact` 格式可以提高插入量少插入频率频繁时的性能。
+数据片段可以以 `Wide` 或 `Compact` 格式存储。在 `Wide` 格式下，每一列都会在文件系统中存储为单独的文件，在 `Compact` 格式下所有列都存储在一个文件中。在插入数据量小但频率频繁时，使用 `Compact` 格式有利于提升性能。
 
 数据存储格式由 `min_bytes_for_wide_part` 和 `min_rows_for_wide_part` 表引擎参数控制。如果数据片段中的字节数或行数少于相应的设置值，数据片段会以 `Compact` 格式存储，否则会以 `Wide` 格式存储。
 
-每个数据片段被逻辑的分割成颗粒（granules）。颗粒是 ClickHouse 中进行数据查询时的最小不可分割数据集。ClickHouse 不会对行或值进行拆分，所以每个颗粒总是包含整数个行。每个颗粒的第一行通过该行的主键值进行标记，
-ClickHouse 会为每个数据片段创建一个索引文件来存储这些标记。对于每列，无论它是否包含在主键当中，ClickHouse 都会存储类似标记。这些标记让您可以在列文件中直接找到数据。
+每个数据片段被逻辑的分割成颗粒（granules）。颗粒是 ClickHouse 中进行数据查询时的最小不可分割数据集。ClickHouse 不会对行或值进行拆分，所以每个颗粒总是包含整数个行。每个颗粒的第一行会使用该行的主键值进行标记，ClickHouse 会为每个数据片段创建一个索引文件来存储这些标记。对于每列，无论它是否包含在主键当中，ClickHouse 都会存储类似的标记。这些标记让您可以在列文件中直接找到数据。
 
-颗粒的大小通过表引擎参数 `index_granularity` 和 `index_granularity_bytes` 控制。颗粒的行数的在 `[1, index_granularity]` 范围中，这取决于行的大小。如果单行的大小超过了 `index_granularity_bytes` 设置的值，那么一个颗粒的大小会超过 `index_granularity_bytes`。在这种情况下，颗粒的大小等于该行的大小。
+颗粒的大小由表引擎参数 `index_granularity` 和 `index_granularity_bytes` 控制。颗粒行的数量在 `[1, index_granularity]` 范围之中，这取决于行的大小。如果单行的大小超过了 `index_granularity_bytes` 设置的值，那么一个颗粒的大小会超过 `index_granularity_bytes`。在这种情况下，颗粒的大小等于该行的大小。
 
 ## 主键和索引在查询中的表现 {#primary-keys-and-indexes-in-queries}
 
@@ -178,7 +174,7 @@ ClickHouse 会为每个数据片段创建一个索引文件来存储这些标记
 - `CounterID IN ('a', 'h') AND Date = 3`，服务器会读取标记号在 `[1, 3)` 和 `[7, 8)` 区间中的数据。
 - `Date = 3`，服务器会读取标记号在 `[1, 10]` 区间中的数据。
 
-上面例子可以看出使用索引通常会比全表描述要高效。
+上面例子可以看出使用索引通常会比全表扫描要高效。
 
 稀疏索引会引起额外的数据读取。当读取主键单个区间范围的数据时，每个数据块中最多会多读 `index_granularity * 2` 行额外的数据。
 
@@ -186,61 +182,61 @@ ClickHouse 会为每个数据片段创建一个索引文件来存储这些标记
 
 ClickHouse 不要求主键唯一，所以您可以插入多条具有相同主键的行。
 
-您可以在`PRIMARY KEY`与`ORDER BY`条件中使用`可为空的`类型的表达式，但强烈建议不要这么做。为了启用这项功能，请打开[allow_nullable_key](https://clickhouse.tech/docs/zh/operations/settings/settings/#allow-nullable-key)，[NULLS_LAST](https://clickhouse.tech/docs/zh/sql-reference/statements/select/order-by/#sorting-of-special-values)规则也适用于`ORDER BY`条件中有NULL值的情况下。
+您可以在 `PRIMARY KEY` 与 `ORDER BY` 条件中使用 `Nullable` 类型的表达式，但强烈建议不要这么做。要启用这项功能，可以打开 [allow_nullable_key](https://clickhouse.tech/docs/zh/operations/settings/settings/#allow-nullable-key) 配置。在 `ORDER BY` 条件中有 `NULL` 值的情况下，会适用 [NULLS_LAST](https://clickhouse.tech/docs/zh/sql-reference/statements/select/order-by/#sorting-of-special-values) 规则。
 
-### 主键的选择 {#zhu-jian-de-xuan-ze}
+### 主键的选择 {#selecting-the-primary-key}
 
-主键中列的数量并没有明确的限制。依据数据结构，您可以在主键包含多些或少些列。这样可以：
+主键中列的数量并没有明确的限制。依据数据结构，您可以自由增添主键列。这样可以：
 
 - 改善索引的性能。
 
     如果当前主键是 `(a, b)` ，在下列情况下添加另一个 `c` 列会提升性能：
 
   - 查询会使用 `c` 列作为条件
-  - 很长的数据范围（ `index_granularity` 的数倍）里 `(a, b)` 都是相同的值，并且这样的情况很普遍。换言之，就是加入另一列后，可以让您的查询略过很长的数据范围。
+  - 数据范围中（`index_granularity` 的数倍）包含大量相同的 `(a, b)`。换言之，加入另一主键列后，查询可以略过很长的数据范围。
 
 - 改善数据压缩。
 
     ClickHouse 以主键排序片段数据，所以，数据的一致性越高，压缩越好。
 
-- 在[CollapsingMergeTree](collapsingmergetree.md#table_engine-collapsingmergetree) 和 [SummingMergeTree](summingmergetree.md) 引擎里进行数据合并时会提供额外的处理逻辑。
+- 在 [CollapsingMergeTree](collapsingmergetree.md#table_engine-collapsingmergetree) 和 [SummingMergeTree](summingmergetree.md) 引擎里进行数据合并时会提供额外的处理逻辑。
 
     在这种情况下，指定与主键不同的 *排序键* 也是有意义的。
 
-长的主键会对插入性能和内存消耗有负面影响，但主键中额外的列并不影响 `SELECT` 查询的性能。
+长的主键会降低插入性能并增加内存消耗，但向主键添加列并不会影响 `SELECT` 查询的性能。
 
 可以使用 `ORDER BY tuple()` 语法创建没有主键的表。在这种情况下 ClickHouse 根据数据插入的顺序存储。如果在使用 `INSERT ... SELECT` 时希望保持数据的排序，请设置 [max_insert_threads = 1](../../../operations/settings/settings.md#settings-max-insert-threads)。
 
-想要根据初始顺序进行数据查询，使用 [单线程查询](../../../operations/settings/settings.md#settings-max_threads)
+要使用初始顺序进行数据查询，可以使用[单线程查询](../../../operations/settings/settings.md#settings-max_threads)
 
 ### 选择与排序键不同的主键 {#choosing-a-primary-key-that-differs-from-the-sorting-key}
 
-Clickhouse可以做到指定一个跟排序键不一样的主键，此时排序键用于在数据片段中进行排序，主键用于在索引文件中进行标记的写入。这种情况下，主键表达式元组必须是排序键表达式元组的前缀(即主键为(a,b)，排序列必须为(a,b,******))。
+Clickhouse 的主键和排序键不要求是相同的，此时排序键用于在数据片段中进行排序，主键用于在索引文件中进行标记的写入。这种情况下，主键表达式元组必须是排序键表达式元组的前缀（即主键为 `(a,b)`，排序键必须为 `(a,b,******)`）。
 
-当使用 [SummingMergeTree](summingmergetree.md) 和 [AggregatingMergeTree](aggregatingmergetree.md) 引擎时，这个特性非常有用。通常在使用这类引擎时，表里的列分两种：*维度* 和 *度量* 。典型的查询会通过任意的 `GROUP BY` 对度量列进行聚合并通过维度列进行过滤。由于 SummingMergeTree 和 AggregatingMergeTree 会对排序键相同的行进行聚合，所以把所有的维度放进排序键是很自然的做法。但这将导致排序键中包含大量的列，并且排序键会伴随着新添加的维度不断的更新。
+当使用 [SummingMergeTree](summingmergetree.md) 和 [AggregatingMergeTree](aggregatingmergetree.md) 引擎时，这个特性非常有用。通常，在使用这类引擎时，表里的列分两种：*维度*（dimensions）和 *度量*（measures）。典型的查询会使用 `GROUP BY` 对度量列进行聚合并通过维度列进行过滤。由于 SummingMergeTree 和 AggregatingMergeTree 会对排序键相同的行进行聚合，所以把所有的维度放进排序键是很自然的做法。但这将导致主键表达式中包含大量的列，并且主键需要伴随着新添加的维度不断的更新。
 
 在这种情况下合理的做法是，只保留少量的列在主键当中用于提升扫描效率，将维度列添加到排序键中。
 
-对排序键进行 [ALTER](../../../sql-reference/statements/alter.md) 是轻量级的操作，因为当一个新列同时被加入到表里和排序键里时，已存在的数据片段并不需要修改。由于旧的排序键是新排序键的前缀，并且新添加的列中没有数据，因此在表修改时的数据对于新旧的排序键来说都是有序的。
+对排序键进行 [ALTER](../../../sql-reference/statements/alter.md) 是轻量级的操作，因为当一个新列同时被加入到表里和排序键里时，旧有的数据片段并不需要修改。由于旧排序键是新排序键的前缀，并且新添加的列中没有数据，因此不管从哪种排序键的角度上来看，修改表时的数据都是有序的。
 
 ### 索引和分区在查询中的应用 {#use-of-indexes-and-partitions-in-queries}
 
-对于 `SELECT` 查询，ClickHouse 分析是否可以使用索引。如果 `WHERE/PREWHERE` 子句具有下面这些表达式（作为完整WHERE条件的一部分或全部）则可以使用索引：进行相等/不相等的比较；对主键列或分区列进行`IN`运算、有固定前缀的`LIKE`运算(如name like 'test%')、函数运算(部分函数适用)，还有对上述表达式进行逻辑运算。
+对于 `SELECT` 查询，ClickHouse 会分析是否可以使用索引。如果 `WHERE/PREWHERE` 子句含有下面这些表达式（作为 WHERE 条件的部分或全部）时，可以使用索引：进行相等/不相等的比较；对主键列或分区列（或基于这些列的表达式）进行的固定前缀 `IN`、`LIKE` 运算（如 `name like 'test%'`）或函数运算（仅支持部分函数），以及上述表达式的逻辑运算。
 
  <!-- It is too hard for me to translate this section as the original text completely. So I did it with my own understanding. If you have good idea, please help me. -->
 <!-- It is hard for me to translate this section too, but I think change the sentence struct is helpful for understanding. So I change the phraseology-->
 
 <!--I try to translate it in Chinese,don't worry. -->
 
-因此，在索引键的一个或多个区间上快速地执行查询是可能的。下面例子中，指定标签；指定标签和日期范围；指定标签和日期；指定多个标签和日期范围等执行查询，都会非常快。
+因此，在索引键的多个区间上快速地执行查询变为可能。在接下来的示例中，不管是对单个标签、单个标签和日期范围、单个标签和单个日期还是多个标签和日期范围的查询，速度都会非常快。
 
-当引擎配置如下时：
+先看一下引擎的配置
 
 ``` sql
     ENGINE MergeTree() PARTITION BY toYYYYMM(EventDate) ORDER BY (CounterID, EventDate) SETTINGS index_granularity=8192
 ```
 
-这种情况下，这些查询：
+此时，对于这些查询：
 
 ``` sql
 SELECT count() FROM table WHERE EventDate = toDate(now()) AND CounterID = 34
@@ -248,11 +244,11 @@ SELECT count() FROM table WHERE EventDate = toDate(now()) AND (CounterID = 34 OR
 SELECT count() FROM table WHERE ((EventDate >= toDate('2014-01-01') AND EventDate <= toDate('2014-01-31')) OR EventDate = toDate('2014-05-01')) AND CounterID IN (101500, 731962, 160656) AND (CounterID = 101500 OR EventDate != toDate('2014-05-01'))
 ```
 
-ClickHouse 会依据主键索引剪掉不符合的数据，依据按月分区的分区键剪掉那些不包含符合数据的分区。
+ClickHouse 会依据主键索引剪裁掉不符合条件的数据，依据按月分区的分区键裁剪掉那些不在指定日期范围内的分区。
 
-上文的查询显示，即使索引用于复杂表达式，因为读表操作经过优化，所以使用索引不会比完整扫描慢。
+上述查询展示了，即使使用了复杂的表达式，也能利用到索引。由于从表读取数据是有序的，因此使用索引不会比全表扫描更慢。
 
-下面这个例子中，不会使用索引。
+但在下面这个例子中则不会使用索引。
 
 ``` sql
 SELECT count() FROM table WHERE CounterID = 34 OR URL LIKE '%upyachka%'
@@ -260,26 +256,27 @@ SELECT count() FROM table WHERE CounterID = 34 OR URL LIKE '%upyachka%'
 
 要检查 ClickHouse 执行一个查询时能否使用索引，可设置 [force_index_by_date](../../../operations/settings/settings.md#settings-force_index_by_date) 和 [force_primary_key](../../../operations/settings/settings.md) 。
 
-使用按月分区的分区列允许只读取包含适当日期区间的数据块，这种情况下，数据块会包含很多天（最多整月）的数据。在块中，数据按主键排序，主键第一列可能不包含日期。因此，仅使用日期而没有用主键字段作为条件的查询将会导致需要读取超过这个指定日期以外的数据。
+按月分区的分区列使得只会读取包含指定日期区间的数据块，此时，数据块会包含很多天（最多一个月）的数据。在块中，数据按主键排序，而主键的第一列可能不包含日期数据。因此，当仅指定日期而没有指定主键前缀作为查询条件时，需要读取更多的数据，而不是只读取指定日期的数据。
 
 ### 部分单调主键的使用
 
-考虑这样的场景，比如一个月中的天数。它们在一个月的范围内形成一个[单调序列](https://zh.wikipedia.org/wiki/单调函数) ，但如果扩展到更大的时间范围它们就不再单调了。这就是一个部分单调序列。如果用户使用部分单调的主键创建表，ClickHouse同样会创建一个稀疏索引。当用户从这类表中查询数据时，ClickHouse 会对查询条件进行分析。如果用户希望获取两个索引标记之间的数据并且这两个标记在一个月以内，ClickHouse 可以在这种特殊情况下使用到索引，因为它可以计算出查询参数与索引标记之间的距离。
+考虑这样的场景，比如一个月中的天数。它们在一个月的范围内形成一个[单调序列](https://zh.wikipedia.org/wiki/单调函数)，但如果扩展到更大的时间范围它们就不再单调了。这就是一个部分单调序列。如果用户使用部分单调的主键创建表，ClickHouse 同样会创建一个稀疏索引。当用户从这类表中查询数据时，ClickHouse 会对查询条件进行分析。如果用户希望获取在相同月份内两个索引标记之间的数据，由于 ClickHouse 可以计算出查询参数与索引标记之间的距离，可以在这种特殊情况下利用到索引。
 
 如果查询参数范围内的主键不是单调序列，那么 ClickHouse 无法使用索引。在这种情况下，ClickHouse 会进行全表扫描。
 
-ClickHouse 在任何主键代表一个部分单调序列的情况下都会使用这个逻辑。
+ClickHouse 在任何部分单调序列主键的情况下都会使用这个逻辑。
 
-### 跳数索引 {#tiao-shu-suo-yin-fen-duan-hui-zong-suo-yin-shi-yan-xing-de}
+### 数据跳过索引 {#data_skipping-indexes}
 
-此索引在 `CREATE` 语句的列部分里定义。
+要声明这种索引，可以在 `CREATE` 语句的列部分里定义。
 
 ``` sql
 INDEX index_name expr TYPE type(...) GRANULARITY granularity_value
 ```
 
-`*MergeTree` 系列的表可以指定跳数索引。
-跳数索引是指数据片段按照粒度(建表时指定的`index_granularity`)分割成小块后，将上述SQL的granularity_value数量的小块组合成一个大的块，对这些大块写入索引信息，这样有助于使用`where`筛选时跳过大量不必要的数据，减少`SELECT`需要读取的数据量。
+`*MergeTree` 系列的表均支持数据跳过索引。
+
+数据跳过索引将在数据块（数据块包含 `granularity_value` 个颗粒，颗粒的大小可以通过引擎参数 `index_granularity` 配置）上聚集指定的表达式。当进行 `SELECT` 查询时，可以使用这些聚集信息跳过大量不满足 `where` 条件的数据。
 
 **示例**
 
@@ -303,32 +300,31 @@ SELECT count() FROM table WHERE s < 'z'
 SELECT count() FROM table WHERE u64 * i32 == 10 AND u64 * length(s) >= 1234
 ```
 
-#### 可用的索引类型 {#table_engine-mergetree-data_skipping-indexes}
+#### 可用的索引类型 {#available-types-of-indices}
 
 - `minmax`
-    存储指定表达式的极值（如果表达式是 `tuple` ，则存储 `tuple` 中每个元素的极值），这些信息用于跳过数据块，类似主键。
+    存储指定表达式的极值（如果表达式是 `tuple`，则存储 `tuple` 中每个元素的极值），这些信息用于跳过数据块，类似主键。
 
 - `set(max_rows)`
-    存储指定表达式的不重复值（不超过 `max_rows` 个，`max_rows=0` 则表示『无限制』）。这些信息可用于检查数据块是否满足 `WHERE` 条件。
+    存储指定表达式的不重复值（不超过 `max_rows` 个，`max_rows=0` 则表示“无限制”）。这些信息可用于检查数据块是否满足 `WHERE` 条件。
 
 - `ngrambf_v1(n, size_of_bloom_filter_in_bytes, number_of_hash_functions, random_seed)`
-    存储一个包含数据块中所有 n元短语（ngram） 的 [布隆过滤器](https://en.wikipedia.org/wiki/Bloom_filter) 。只可用在字符串上。
-    可用于优化 `equals` ， `like` 和 `in` 表达式的性能。
+    存储包含数据块中所有 n 元短语（ngram）的[布隆过滤器](https://zh.wikipedia.org/wiki/%E5%B8%83%E9%9A%86%E8%BF%87%E6%BB%A4%E5%99%A8) 。仅支持字符串字段。可用于优化 `equals`、`like` 和 `in` 表达式的性能。
   - `n` – 短语长度。
-  - `size_of_bloom_filter_in_bytes` – 布隆过滤器大小，字节为单位。（因为压缩得好，可以指定比较大的值，如 256 或 512）。
-  - `number_of_hash_functions` – 布隆过滤器中使用的哈希函数的个数。
+  - `size_of_bloom_filter_in_bytes` – 布隆过滤器大小，以字节为单位。（由于压缩性能较好，可以在这里指定比较大的值，如 256 或 512）。
+  - `number_of_hash_functions` – 布隆过滤器中使用哈希函数的个数。
   - `random_seed` – 哈希函数的随机种子。
 
 - `tokenbf_v1(size_of_bloom_filter_in_bytes, number_of_hash_functions, random_seed)`
-    跟 `ngrambf_v1` 类似，但是存储的是token而不是ngrams。Token是由非字母数字的符号分割的序列。
+    跟 `ngrambf_v1` 类似，但是存储的是 token 而不是 ngrams。Token 是由非字母数字的符号分割的序列。
 
 - `bloom_filter(bloom_filter([false_positive])` – 为指定的列存储布隆过滤器
 
-    可选参数`false_positive`用来指定从布隆过滤器收到错误响应的几率。取值范围是 (0,1)，默认值：0.025
+    可选参数 `false_positive` 用来指定从布隆过滤器收到错误响应的几率。取值范围是 (0,1)，默认值：0.025。
 
-    支持的数据类型：`Int*`, `UInt*`, `Float*`, `Enum`, `Date`, `DateTime`, `String`, `FixedString`, `Array`, `LowCardinality`, `Nullable`。
+    支持的数据类型：`Int*`、`UInt*`、`Float*`、`Enum`、`Date`、`DateTime`、`String`、`FixedString`、`Array`、`LowCardinality`、`Nullable`。
 
-    以下函数会用到这个索引： [equals](../../../sql-reference/functions/comparison-functions.md), [notEquals](../../../sql-reference/functions/comparison-functions.md), [in](../../../sql-reference/functions/in-functions.md), [notIn](../../../sql-reference/functions/in-functions.md), [has](../../../sql-reference/functions/array-functions.md)
+    以下函数可以利用这种索引：[equals](../../../sql-reference/functions/comparison-functions.md)、[notEquals](../../../sql-reference/functions/comparison-functions.md)、[in](../../../sql-reference/functions/in-functions.md)、[notIn](../../../sql-reference/functions/in-functions.md)、[has](../../../sql-reference/functions/array-functions.md)
 
 ``` sql
 INDEX sample_index (u64 * length(s)) TYPE minmax GRANULARITY 4
@@ -338,9 +334,9 @@ INDEX sample_index3 (lower(str), str) TYPE ngrambf_v1(3, 256, 2, 0) GRANULARITY 
 
 #### 函数支持 {#functions-support}
 
-WHERE 子句中的条件可以包含对某列数据进行运算的函数表达式，如果列是索引的一部分，ClickHouse会在执行函数时尝试使用索引。不同的函数对索引的支持是不同的。
+WHERE 子句中的条件可以包含对某列数据进行运算的函数表达式，如果列是索引的一部分，ClickHouse 会在执行函数时尝试使用索引。不同函数所支持的索引种类不一。
 
-`set` 索引会对所有函数生效，其他索引对函数的生效情况见下表
+`set` 索引会对所有函数生效，其他索引对函数的生效情况见下表。
 
 | 函数 (操作符) / 索引                                         | primary key | minmax | ngrambf_v1 | tokenbf_v1 | bloom_filter |
 | ------------------------------------------------------------ | ----------- | ------ | ---------- | ---------- | ------------ |
@@ -364,15 +360,17 @@ WHERE 子句中的条件可以包含对某列数据进行运算的函数表达�
 常量参数小于 ngram 大小的函数不能使用 `ngrambf_v1` 进行查询优化。
 
 !!! note "注意"
+
 布隆过滤器可能会包含不符合条件的匹配，所以 `ngrambf_v1`, `tokenbf_v1` 和 `bloom_filter` 索引不能用于结果返回为假的函数，例如：
 
-- 可以用来优化的场景
+- 可优化的场景
   - `s LIKE '%test%'`
   - `NOT s NOT LIKE '%test%'`
   - `s = 1`
   - `NOT s != 1`
   - `startsWith(s, 'test')`
-- 不能用来优化的场景
+
+- 不可优化的场景
   - `NOT s LIKE '%test%'`
   - `s NOT LIKE '%test%'`
   - `NOT s = 1`
